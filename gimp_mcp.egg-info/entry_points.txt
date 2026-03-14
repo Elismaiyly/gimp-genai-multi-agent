@@ -1,0 +1,2 @@
+[console_scripts]
+gimp-mcp-server = gimp_mcp_server:main

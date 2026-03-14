@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environnements
+venv/
+.venv/
+venv-iopaint/
+
+# modèles IA
+*.pt
+*.pth
+*.ckpt
+
+# dossiers lourds
+lama/
+sam/
+Segmentation_Instance/
+pipeline/
+
+# datasets
+data/
+datasets/
+
+# outputs
+outputs/
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
