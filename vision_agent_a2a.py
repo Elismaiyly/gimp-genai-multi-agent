@@ -1,6 +1,7 @@
 # vision_agent_a2a.py
 from __future__ import annotations
 import traceback
+import cv2
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -54,10 +55,26 @@ ALIASES = {
 
     "casque": "helmet",
     "helmet": "helmet",
+    "hat": "helmet",
+    "personne": "person",
+    "people": "person",
+    "human": "person",
+    "humain": "person",
+    "objet": "object",
+    "object": "object",
+    "item": "object",
 }
 
 def normalize_target(t: str) -> str:
+    import re
+
     t = (t or "").lower().strip()
+    t = re.sub(
+        r"^(?:de\s+la\s+|de\s+l[\'’]|de\s+|le\s+|la\s+|les\s+|l[\'’]|un\s+|une\s+|des\s+|du\s+|the\s+|a\s+|an\s+)",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    ).strip()
     return ALIASES.get(t, t)
 
 
@@ -294,6 +311,57 @@ def bbox_from_mask(mask: np.ndarray) -> Optional[Tuple[int,int,int,int]]:
     if xs.size == 0 or ys.size == 0:
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def build_instance_from_mask(
+    label: str,
+    mask_bool: np.ndarray,
+    score: float,
+    instance_id: int,
+) -> Optional[Dict[str, Any]]:
+    bbox = mask_to_bbox_xywh(mask_bool)
+    if bbox is None:
+        return None
+
+    return {
+        "id": int(instance_id),
+        "label": label,
+        "score": float(score),
+        "bbox": bbox,
+        "mask": {"type": "binary_mask_png", "png_b64": mask_to_png_base64(mask_bool)},
+    }
+
+
+def append_instance_candidate(
+    out: List[Dict[str, Any]],
+    label: str,
+    mask_bool: np.ndarray,
+    score: float,
+    max_instances: int,
+    iou_threshold: float = 0.65,
+) -> None:
+    bbox_xyxy = bbox_from_mask(mask_bool)
+    if bbox_xyxy is None:
+        return
+
+    for idx, existing in enumerate(out):
+        eb = existing.get("bbox") or {}
+        ex1 = float(eb.get("x", 0))
+        ey1 = float(eb.get("y", 0))
+        ex2 = ex1 + float(eb.get("width", 0))
+        ey2 = ey1 + float(eb.get("height", 0))
+        if _box_iou(np.array(bbox_xyxy, dtype=np.float32), np.array([ex1, ey1, ex2, ey2], dtype=np.float32)) >= iou_threshold:
+            if float(score) > float(existing.get("score", 0.0)):
+                inst = build_instance_from_mask(label, mask_bool, score, existing.get("id", idx))
+                if inst is not None:
+                    out[idx] = inst
+            return
+
+    inst = build_instance_from_mask(label, mask_bool, score, len(out))
+    if inst is not None:
+        out.append(inst)
+        out.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        del out[max_instances:]
 
 def sample_points_in_mask(mask: np.ndarray, k: int = 3, seed: int = 0) -> np.ndarray:
     ys, xs = np.where(mask)
@@ -543,6 +611,245 @@ def keep_largest_component(mask: np.ndarray) -> np.ndarray:
     return out
 
 
+def refine_motorcycle_mask(
+    mask: np.ndarray,
+    box_xyxy: List[int],
+    person_mask: Optional[np.ndarray] = None,
+    body_focus: bool = False,
+    stats_out: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """
+    Tighten motorcycle silhouettes after SAM:
+      - stay strictly inside the resolved motorcycle box
+      - remove broad bottom-floor attachments
+      - reduce overlap with rider/person regions
+      - keep a single dominant vehicle component
+    """
+    raw_mask = mask.astype(bool)
+    m = apply_box(raw_mask, box_xyxy)
+    bbox_clamp_applied = not np.array_equal(m, raw_mask)
+
+    m_before_lcc = m.copy()
+    m = keep_largest_component(m)
+    lcc_applied = not np.array_equal(m, m_before_lcc)
+
+    x1, y1, x2, y2 = box_xyxy
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    box_area = float(max(1, bw * bh))
+    raw_ratio_in_box = float(m[y1:y2, x1:x2].sum()) / box_area
+    person_removed_ratio = 0.0
+    lower_wheel_suppressed = False
+
+    # Motorcycle masks that occupy nearly the whole box are usually box spill,
+    # not the vehicle silhouette itself. Tighten before later gate checks.
+    ratio_in_box = raw_ratio_in_box
+    if ratio_in_box > 0.55:
+        m_u8 = m.astype(np.uint8)
+        m_u8 = cv2.morphologyEx(
+            m_u8,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            iterations=1,
+        )
+        m_u8 = cv2.erode(
+            m_u8,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            iterations=1,
+        )
+        m = m_u8.astype(bool)
+
+    # Ground leakage often appears as a near-full-width band on the bottom.
+    trim_start = y1 + int((0.70 if body_focus else 0.76) * bh)
+    for yy in range(trim_start, y2):
+        cols = np.where(m[yy, x1:x2])[0]
+        if cols.size == 0:
+            continue
+        row_width = int(cols.max() - cols.min() + 1)
+        if row_width >= int((0.76 if body_focus else 0.84) * bw):
+            m[yy, x1:x2] = False
+            lower_wheel_suppressed = True
+        elif row_width >= int(0.72 * bw):
+            cut = max(1, int((0.12 if body_focus else 0.06) * bw))
+            left = x1 + int(cols.min())
+            right = x1 + int(cols.max())
+            row = np.zeros_like(m[yy], dtype=bool)
+            row[max(x1, left + cut):min(x2, right - cut + 1)] = m[yy, max(x1, left + cut):min(x2, right - cut + 1)]
+            m[yy] = row
+            lower_wheel_suppressed = True
+
+    if body_focus:
+        wheel_band_start = y1 + int(0.64 * bh)
+        wheel_band_end = y1 + int(0.88 * bh)
+        side_band = max(1, int(0.22 * bw))
+        if wheel_band_end > wheel_band_start and side_band > 0:
+            side_suppression = np.zeros_like(m, dtype=bool)
+            side_suppression[wheel_band_start:wheel_band_end, x1:min(x2, x1 + side_band)] = True
+            side_suppression[wheel_band_start:wheel_band_end, max(x1, x2 - side_band):x2] = True
+            if np.any(m & side_suppression):
+                m &= ~side_suppression
+                lower_wheel_suppressed = True
+
+        # The very bottom of the box is mostly tires/ground for recolor use.
+        hard_cut_start = y1 + int(0.86 * bh)
+        if hard_cut_start < y2 and np.any(m[hard_cut_start:y2, x1:x2]):
+            m[hard_cut_start:y2, x1:x2] = False
+            lower_wheel_suppressed = True
+
+    if person_mask is not None:
+        person_overlap = m & person_mask.astype(bool)
+        overlap_area = int(person_overlap.sum())
+        if overlap_area > 0:
+            overlap_ratio = overlap_area / float(max(1, m.sum()))
+            if overlap_ratio > (0.03 if body_focus else 0.06):
+                overlap_u8 = person_overlap.astype(np.uint8)
+                overlap_u8 = cv2.dilate(
+                    overlap_u8,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+                    iterations=(2 if body_focus else 1),
+                )
+                overlap_mask = overlap_u8.astype(bool)
+                person_removed_ratio = float(overlap_mask.sum()) / box_area
+                m &= ~overlap_mask
+
+    # Final cleanup: keep one dominant component and reject near-box-filling spill.
+    m_u8 = m.astype(np.uint8)
+    m_u8 = cv2.morphologyEx(
+        m_u8,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    m_u8 = cv2.erode(
+        m_u8,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
+    m = m_u8.astype(bool)
+
+    m = apply_box(m, box_xyxy)
+    bbox_clamp_applied = bbox_clamp_applied or (not np.array_equal(m, raw_mask))
+    m_before_final_lcc = m.copy()
+    m = keep_largest_component(m)
+    lcc_applied = lcc_applied or (not np.array_equal(m, m_before_final_lcc))
+    final_ratio_in_box = float(m[y1:y2, x1:x2].sum()) / box_area
+
+    if final_ratio_in_box > (0.60 if body_focus else 0.70):
+        m_u8 = m.astype(np.uint8)
+        m_u8 = cv2.erode(
+            m_u8,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            iterations=1,
+        )
+        m = keep_largest_component(m_u8.astype(bool))
+        final_ratio_in_box = float(m[y1:y2, x1:x2].sum()) / box_area
+
+    if final_ratio_in_box > (0.68 if body_focus else 0.78):
+        m = np.zeros_like(m, dtype=bool)
+        final_ratio_in_box = 0.0
+
+    if stats_out is not None:
+        stats_out["bbox_clamp_applied"] = bool(bbox_clamp_applied)
+        stats_out["lcc_applied"] = bool(lcc_applied)
+        stats_out["raw_ratio_in_box"] = float(raw_ratio_in_box)
+        stats_out["final_ratio_in_box"] = float(final_ratio_in_box)
+        stats_out["person_removed_ratio"] = float(person_removed_ratio)
+        stats_out["lower_wheel_suppressed"] = bool(lower_wheel_suppressed)
+
+    return m.astype(bool)
+
+
+def refine_jacket_mask(
+    mask: np.ndarray,
+    box_xyxy: List[int],
+    person_mask: Optional[np.ndarray] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """
+    General jacket refinement for recolor-oriented clothing masks:
+      - stay within the selected jacket box
+      - bias retention toward the upper-body region of the detected person
+      - reconnect torso and sleeve fragments
+      - keep one coherent clothing component without broad expansion
+    """
+    raw_mask = mask.astype(bool)
+    m = apply_box(raw_mask, box_xyxy)
+    bbox_clamp_applied = not np.array_equal(m, raw_mask)
+    raw_ratio = float(m.sum()) / float(max(1, m.shape[0] * m.shape[1]))
+
+    reconnect_applied = False
+    person_bias_applied = False
+
+    x1, y1, x2, y2 = box_xyxy
+
+    if person_mask is not None and int(person_mask.sum()) > 0:
+        pm = person_mask.astype(bool)
+        py, px = np.where(pm)
+        if px.size > 0 and py.size > 0:
+            py1 = int(py.min())
+            py2 = int(py.max()) + 1
+            px1 = int(px.min())
+            px2 = int(px.max()) + 1
+            ph = max(1, py2 - py1)
+            pw = max(1, px2 - px1)
+
+            upper_cut = py1 + int(0.74 * ph)
+            shoulder_band = py1 + int(0.18 * ph)
+            upper_person = np.zeros_like(pm, dtype=bool)
+            upper_person[py1:upper_cut, px1:px2] = pm[py1:upper_cut, px1:px2]
+
+            # Add a conservative torso bridge inside the person upper body so sleeve
+            # fragments can reconnect without expanding into background.
+            torso_x1 = px1 + int(0.18 * pw)
+            torso_x2 = px2 - int(0.18 * pw)
+            if torso_x2 > torso_x1:
+                upper_person[shoulder_band:upper_cut, torso_x1:torso_x2] |= pm[shoulder_band:upper_cut, torso_x1:torso_x2]
+
+            before_person_bias = m.copy()
+            m &= upper_person
+            if int(m.sum()) == 0:
+                m = before_person_bias & pm
+            person_bias_applied = not np.array_equal(before_person_bias, m)
+
+    m_u8 = m.astype(np.uint8)
+    m_u8 = cv2.morphologyEx(
+        m_u8,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
+        iterations=2,
+    )
+    reconnect_applied = True
+    m_u8 = cv2.morphologyEx(
+        m_u8,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 13)),
+        iterations=1,
+    )
+    reconnect_applied = True
+    m_u8 = cv2.morphologyEx(
+        m_u8,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    m = m_u8.astype(bool)
+
+    before_lcc = m.copy()
+    m = keep_largest_component(m)
+    lcc_applied = not np.array_equal(before_lcc, m)
+
+    if stats_out is not None:
+        refined_ratio = float(m.sum()) / float(max(1, m.shape[0] * m.shape[1]))
+        stats_out["raw_ratio"] = float(raw_ratio)
+        stats_out["refined_ratio"] = float(refined_ratio)
+        stats_out["bbox_clamp_applied"] = bool(bbox_clamp_applied)
+        stats_out["lcc_applied"] = bool(lcc_applied)
+        stats_out["reconnect_applied"] = bool(reconnect_applied)
+        stats_out["person_bias_applied"] = bool(person_bias_applied)
+
+    return m.astype(bool)
+
+
 def build_person_mask(img_np: np.ndarray, person_box_xyxy: List[int], min_area: int, close_ksize: int, debug: bool=False) -> np.ndarray:
     """YOLO person box -> SAM -> clean -> STRICT clamp to pbox -> keep largest CC."""
     H, W = img_np.shape[:2]
@@ -721,6 +1028,7 @@ async def a2a_invoke(req: A2AInvokeRequest):
         close_ksize = int(req.params.get("close_ksize", 7))
 
         debug = bool(req.params.get("debug", False))
+        motorcycle_body_focus = bool(req.params.get("motorcycle_body_focus", False))
 
         hint_group = guess_hint_group(target)  # "head"/"upper"/"lower"/"hands"/"feet"/"any"
         instances: List[Dict[str, Any]] = []
@@ -736,7 +1044,7 @@ async def a2a_invoke(req: A2AInvokeRequest):
         motorcycle_mask: Optional[np.ndarray] = None
         pbox0: Optional[List[int]] = None  # person box (pour quality_gate upper/head)
 
-        if IS_CLOTH:
+        if IS_CLOTH or target == "motorcycle":
             # --- PERSON BOX + PERSON MASK ---
             person_boxes = yolo_detect(img_np, "person", conf_thresh) or []
             if person_boxes:
@@ -759,7 +1067,7 @@ async def a2a_invoke(req: A2AInvokeRequest):
             if m_boxes:
                 mx1, my1, mx2, my2, _ = m_boxes[0]
                 mbox = clamp_box([mx1, my1, mx2, my2], W, H)
-                mbox = pad_box_xyxy(mbox, W, H, pad_ratio=0.08)
+                mbox = pad_box_xyxy(mbox, W, H, pad_ratio=(0.02 if motorcycle_body_focus else 0.04))
 
                 masksN, scoresN = sam_predict_multimask(img_np, mbox, hint_group="any")
                 m_best_moto = best_mask_from_candidates(masksN, scoresN, ref_box=mbox)
@@ -791,15 +1099,23 @@ async def a2a_invoke(req: A2AInvokeRequest):
 
         if not IS_CLOTH:
             boxes_yolo = yolo_detect(img_np, target, conf_thresh) or []
-            boxes_all.extend(boxes_yolo)
-
-            boxes_owl = ov_detect_topk_boxes(img, target, conf=ov_conf, topk=owl_topk, nms_iou=owl_nms) or []
-            boxes_all.extend(boxes_owl)
+            if target == "motorcycle" and boxes_yolo:
+                boxes_all.extend(boxes_yolo)
+                boxes_owl = []
+            else:
+                boxes_all.extend(boxes_yolo)
+                boxes_owl = ov_detect_topk_boxes(img, target, conf=ov_conf, topk=owl_topk, nms_iou=owl_nms) or []
+                boxes_all.extend(boxes_owl)
 
             boxes_all = _nms_xyxy(boxes_all, iou_thr=0.55)
 
             if debug:
                 print(f"[DEBUG] boxes_yolo={len(boxes_yolo)} boxes_owl={len(boxes_owl)} boxes_all(after_nms)={len(boxes_all)}")
+            if target == "motorcycle":
+                print(
+                    "🏍️ [VISION moto] "
+                    f"boxes_yolo={len(boxes_yolo)} boxes_owl={len(boxes_owl)} boxes_all={len(boxes_all)}"
+                )
         else:
             prompts = cloth_prompts(target)
             boxes_owl = ov_detect_multi_prompts(
@@ -825,6 +1141,7 @@ async def a2a_invoke(req: A2AInvokeRequest):
             boxes_for_union = boxes_all[:max_boxes_for_union]
 
             seg_masks: List[np.ndarray] = []
+            seg_instances: List[Dict[str, Any]] = []
             best_box_conf = float(boxes_all[0][4])
 
             # ------- masks négatifs optionnels (très utiles en prod) -------
@@ -862,23 +1179,51 @@ async def a2a_invoke(req: A2AInvokeRequest):
 
             for (x1, y1, x2, y2, bconf) in boxes_for_union:
                 box = clamp_box([x1, y1, x2, y2], W, H)
-                box = pad_box_xyxy(box, W, H, pad_ratio=pad_ratio)
+                box = pad_box_xyxy(
+                    box,
+                    W,
+                    H,
+                    pad_ratio=(0.02 if (target == "motorcycle" and motorcycle_body_focus) else (0.04 if target == "motorcycle" else pad_ratio))
+                )
 
                 # 1) coarse mask (box-only)
                 mN, sN = sam_predict_multimask(img_np, box, hint_group=hint_group)
                 m0 = best_mask_from_candidates(mN, sN, ref_box=box)
                 m0 = clean_mask(m0, min_area=min_area, close_ksize=close_ksize)
                 m0 = apply_box(m0, box)
+                jacket_stats: Dict[str, Any] = {}
+
+                if target == "motorcycle":
+                    coarse_stats: Dict[str, Any] = {}
+                    m0 = refine_motorcycle_mask(
+                        m0,
+                        box,
+                        person_mask=person_mask,
+                        body_focus=motorcycle_body_focus,
+                        stats_out=coarse_stats,
+                    )
+                elif target == "jacket":
+                    m0 = refine_jacket_mask(
+                        m0,
+                        box,
+                        person_mask=person_mask,
+                        stats_out=jacket_stats,
+                    )
 
                 # 2) contraintes générales (TES LIGNES)
+                pre_neg_area = int(m0.sum())
                 if IS_CLOTH and person_mask is not None:
                     m0 = m0 & person_mask
                 if IS_CLOTH and motorcycle_mask is not None:
                     m0 = m0 & (~motorcycle_mask)
                 if hint_group == "upper" and gloves_mask is not None:
                     m0 = m0 & (~gloves_mask)
+                if target == "jacket":
+                    jacket_stats["neg_removed"] = int(m0.sum()) < pre_neg_area
 
                 if int(m0.sum()) == 0:
+                    if target == "motorcycle":
+                        print(f"🏍️ [VISION moto] dropped coarse mask bbox={list(box)} reason=empty_after_refine")
                     continue
 
                 # 3) points positifs = dans m0 (déjà contraint)
@@ -907,19 +1252,41 @@ async def a2a_invoke(req: A2AInvokeRequest):
 
                 best = None
                 best_sc = -1e9
+                best_stats: Dict[str, Any] = {}
 
                 for mi, si in zip(mG, sG):
                     m = mi.astype(bool)
                     m = clean_mask(m, min_area=min_area, close_ksize=close_ksize)
                     m = apply_box(m, box)
 
+                    if target == "motorcycle":
+                        cur_stats: Dict[str, Any] = {}
+                        m = refine_motorcycle_mask(
+                            m,
+                            box,
+                            person_mask=person_mask,
+                            body_focus=motorcycle_body_focus,
+                            stats_out=cur_stats,
+                        )
+                    elif target == "jacket":
+                        cur_stats = {}
+                        m = refine_jacket_mask(
+                            m,
+                            box,
+                            person_mask=person_mask,
+                            stats_out=cur_stats,
+                        )
+
                     # re-apply contraintes générales
+                    pre_neg_area = int(m.sum())
                     if IS_CLOTH and person_mask is not None:
                         m = m & person_mask
                     if IS_CLOTH and motorcycle_mask is not None:
                         m = m & (~motorcycle_mask)
                     if hint_group == "upper" and gloves_mask is not None:
                         m = m & (~gloves_mask)
+                    if target == "jacket":
+                        cur_stats["neg_removed"] = int(m.sum()) < pre_neg_area
 
                     if int(m.sum()) == 0:
                         continue
@@ -928,29 +1295,72 @@ async def a2a_invoke(req: A2AInvokeRequest):
                     if sc > best_sc:
                         best_sc = sc
                         best = m
+                        if target == "motorcycle":
+                            best_stats = cur_stats
+                        elif target == "jacket":
+                            best_stats = cur_stats
 
                 if best is None:
+                    if target == "motorcycle":
+                        print(f"🏍️ [VISION moto] dropped guided bbox={list(box)} reason=no_candidate_survived")
                     continue
 
                 # 6) gate final
                 ref_inst = bbox_from_mask(best) or tuple(box)
+                gate_ref_box = tuple(box) if target == "motorcycle" else (tuple(pbox0) if pbox0 is not None else ref_inst)
+                gate_person_box = None if target == "motorcycle" else (tuple(pbox0) if pbox0 is not None else None)
                 gate = quality_gate(
                     best,
                     target=target,
                     hint_group=hint_group,
                     image_shape=(H, W),
-                    ref_box_xyxy=(tuple(pbox0) if pbox0 is not None else ref_inst),
-                    person_box_xyxy=(tuple(pbox0) if pbox0 is not None else None),
+                    ref_box_xyxy=gate_ref_box,
+                    person_box_xyxy=gate_person_box,
                 )
                 if not gate.ok:
-                    if debug:
+                    if debug or target == "motorcycle":
                         print("❌ [QUALITY_GATE inst]", gate.reason, gate.stats)
                     continue
 
-                seg_masks.append((gate.mask if gate.mask is not None else best).astype(bool))
+                best_mask = (gate.mask if gate.mask is not None else best).astype(bool)
+                if target == "motorcycle":
+                    print(
+                        "🏍️ [VISION moto] "
+                        f"bbox={list(box)} "
+                        f"raw_in_box={best_stats.get('raw_ratio_in_box', 0.0)*100:.1f}% "
+                        f"refined_in_box={best_stats.get('final_ratio_in_box', 0.0)*100:.1f}% "
+                        f"wheel_suppressed={'yes' if best_stats.get('lower_wheel_suppressed') else 'no'} "
+                        f"person_removed={best_stats.get('person_removed_ratio', 0.0)*100:.1f}% "
+                        f"lcc={'yes' if best_stats.get('lcc_applied') else 'no'} "
+                        f"bbox_clamp={'yes' if best_stats.get('bbox_clamp_applied') else 'no'}"
+                    )
+                elif target == "jacket":
+                    print(
+                        "🧥 [VISION jacket] "
+                        f"bbox={list(box)} "
+                        f"raw={best_stats.get('raw_ratio', 0.0)*100:.1f}% "
+                        f"refined={best_stats.get('refined_ratio', 0.0)*100:.1f}% "
+                        f"lcc={'yes' if best_stats.get('lcc_applied') else 'no'} "
+                        f"reconnect={'yes' if best_stats.get('reconnect_applied') else 'no'} "
+                        f"neg_removed={'yes' if best_stats.get('neg_removed') else 'no'}"
+                    )
+                seg_masks.append(best_mask)
+                append_instance_candidate(
+                    seg_instances,
+                    target,
+                    best_mask,
+                    float(best_sc if best_sc > -1e8 else bconf),
+                    max_instances=max_instances,
+                )
 
-            # Union + gate final
-            if seg_masks:
+            if seg_instances:
+                seg_instances.sort(key=lambda inst: (inst["bbox"]["x"], inst["bbox"]["y"]))
+                for idx, inst in enumerate(seg_instances):
+                    inst["id"] = idx
+                instances.extend(seg_instances[:max_instances])
+
+            # Union + gate final (fallback only if no usable separate instance survived)
+            elif seg_masks:
                 mask_union = union_masks(seg_masks)
                 mask_union = clean_mask(mask_union, min_area=min_area, close_ksize=close_ksize)
 
@@ -970,13 +1380,9 @@ async def a2a_invoke(req: A2AInvokeRequest):
                 )
                 if gate2.ok:
                     mask_union = gate2.mask if gate2.mask is not None else mask_union
-                    instances.append({
-                        "id": 0,
-                        "label": target,
-                        "score": float(best_box_conf),
-                        "bbox": {"x": 0, "y": 0, "width": W, "height": H},
-                        "mask": {"type": "binary_mask_png", "png_b64": mask_to_png_base64(mask_union)},
-                    })
+                    inst = build_instance_from_mask(target, mask_union, float(best_box_conf), 0)
+                    if inst is not None:
+                        instances.append(inst)
                 else:
                     if debug:
                         print("❌ [QUALITY_GATE union]", gate2.reason, gate2.stats)
@@ -1072,13 +1478,9 @@ async def a2a_invoke(req: A2AInvokeRequest):
 
                         if gate.ok:
                             m_out = gate.mask if gate.mask is not None else m_best
-                            instances.append({
-                                "id": 0,
-                                "label": target,
-                                "score": float(pconf),
-                                "bbox": {"x": 0, "y": 0, "width": W, "height": H},
-                                "mask": {"type": "binary_mask_png", "png_b64": mask_to_png_base64(m_out)},
-                            })
+                            inst = build_instance_from_mask(target, m_out, float(pconf), 0)
+                            if inst is not None:
+                                instances.append(inst)
                         elif debug:
                             print("❌ [QUALITY_GATE fallback]", gate.reason, gate.stats)
 
@@ -1086,6 +1488,8 @@ async def a2a_invoke(req: A2AInvokeRequest):
         # FIN
         # -------------------------------------------------
         if not instances:
+            if target == "motorcycle":
+                print("🏍️ [VISION moto] no_instances reason=segmentation_empty")
             return {"status": "error", "message": f"Segmentation vide (target={target})"}
 
         if multi:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+print("### GIMP MCP PLUGIN ACTIVE:", __file__)
 print("### VERSION VSCode LOADED ###")
 """
 GIMP MCP Plugin - Model Context Protocol integration for GIMPsml
@@ -27,6 +28,8 @@ import tempfile
 import os
 import platform
 import signal
+import colorsys
+from pathlib import Path
 
 # Constants for configuration and thresholds
 LARGE_SCALING_THRESHOLD = 4.0  # Warn if scaling ratio exceeds this value
@@ -1240,7 +1243,7 @@ class MCPPlugin(Gimp.PlugIn):
 
 
      #08
-    def _safe_png_export(self, image, drawable, path):
+    def _safe_png_export(self, image, drawable, path, save_transparency=True):
         from gi.repository import Gimp, Gio
 
         file_obj = Gio.File.new_for_path(path)
@@ -1269,7 +1272,7 @@ class MCPPlugin(Gimp.PlugIn):
         for k, v in {
             "compression": 9,
             "interlaced": False,
-            "save-transparency": True,
+            "save-transparency": bool(save_transparency),
             "save-color-profile": False,
             "save-exif": False,
             "save-xmp": False,
@@ -1593,8 +1596,13 @@ class MCPPlugin(Gimp.PlugIn):
                     from gi.repository import Gimp
 
                     hue = float(params.get("hue", 0.0))              # 0..360
-                    saturation = float(params.get("saturation", 50)) # -100..100 (ou 0..100 selon usage)
-                    lightness = float(params.get("lightness", 0))    # -100..100
+                    saturation = float(params.get("saturation", 72)) # -100..100 (ou 0..100 selon usage)
+                    lightness = float(params.get("lightness", 18))   # -100..100
+
+                    print(
+                        "🎨 [PLUGIN recolor] "
+                        f"hue={hue:.0f} sat={saturation:.0f} light={lightness:.0f}"
+                    )
 
                     # (optionnel mais recommandé) vérifier qu'il y a une sélection non vide
                     try:
@@ -1668,6 +1676,11 @@ class MCPPlugin(Gimp.PlugIn):
                     proc.run(cfg)
                     Gimp.displays_flush()
 
+                    print(
+                        "🎨 [PLUGIN recolor] "
+                        f"procedure={proc_name_used} hue={hue:.0f} sat={saturation:.0f} light={lightness:.0f}"
+                    )
+
                     executed.append({
                         "action": name,
                         "status": "ok",
@@ -1698,7 +1711,7 @@ class MCPPlugin(Gimp.PlugIn):
 # - Paramètres par défaut intégrés si absents
                 # ===================================================
                 elif name == "smart_inpaint":
-                    import subprocess, tempfile, os
+                    import subprocess, tempfile, os, time
                     from gi.repository import Gimp, Gio, Gegl
 
                     # -----------------------------
@@ -1721,11 +1734,49 @@ class MCPPlugin(Gimp.PlugIn):
                     # Post-process Lama (tu peux les passer depuis IR plus tard)
                     FEATHER_STRENGTH = int(params.get("feather_strength", 19))
                     SOFTEN_SIGMA     = float(params.get("soften_sigma", 1.2))
+                    timeout_provided = "timeout_seconds" in params
+                    lama_timeout_provided = "lama_timeout" in params
+                    SMART_INPAINT_TIMEOUT = float(params.get("timeout_seconds", 25.0))
+                    LAMA_TIMEOUT = float(params.get("lama_timeout", max(5.0, SMART_INPAINT_TIMEOUT - 5.0)))
+                    OPENCV_RADIUS = float(params.get("opencv_radius", 5.0))
+                    MAX_DIM = int(params.get("max_dim", 2048))
+                    requested_mode = str(
+                        params.get("inpaint_mode", params.get("mode", "high_quality"))
+                    ).strip().lower() or "high_quality"
+                    INPAINT_MODE = requested_mode
+
+                    img_w = int(image.get_width())
+                    img_h = int(image.get_height())
+                    max_side = max(img_w, img_h)
+                    megapixels = (img_w * img_h) / 1_000_000.0
+
+                    # Keep the plugin response budget under the client's default 30s socket timeout.
+                    SMART_INPAINT_TIMEOUT = max(5.0, min(float(SMART_INPAINT_TIMEOUT), 28.0))
+                    if not lama_timeout_provided:
+                        LAMA_TIMEOUT = max(5.0, min(float(LAMA_TIMEOUT), SMART_INPAINT_TIMEOUT - 4.0))
+
+                    auto_reliable_reason = None
+                    if requested_mode in ("", "high_quality", "quality", "lama", "auto"):
+                        if not timeout_provided and (max_side >= 3000 or megapixels >= 12.0):
+                            INPAINT_MODE = "reliable"
+                            auto_reliable_reason = (
+                                f"large_image {img_w}x{img_h} ({megapixels:.1f} MP) under response budget"
+                            )
+
+                    # smart_inpaint params:
+                    # - inpaint_mode="high_quality": LaMa first, OpenCV fallback on failure
+                    # - inpaint_mode="reliable": OpenCV directly for demo-safe completion
+                    # - timeout_seconds: overall timeout for the helper subprocess (clamped <= 28s)
+                    # - lama_timeout: timeout for the LaMa subprocess inside the helper
+                    # - opencv_radius: radius used by cv2.inpaint in reliable/fallback mode
+                    # - max_dim: downscale the working image/mask before backend inpaint
 
                     # chemin script
-                    LAMA_SCRIPT = params.get("lama_script", "/home/el-ismaiyly/gimp-mcp/pipeline/opencv_inpaint_final.py")
-
-                    # -----------------------------
+                    LAMA_SCRIPT = params.get(
+                        "lama_script",
+                        str(Path(__file__).resolve().parent / "pipeline" / "opencv_inpaint_final.py")
+                    )
+                                        # -----------------------------
                     # Helpers (compat GIMP 3 / fallback PDB)
                     # -----------------------------
                     def _dup_layer(layer):
@@ -1847,6 +1898,22 @@ class MCPPlugin(Gimp.PlugIn):
                         out_path  = os.path.join(tmp_dir, "out.png")
 
                         print("[SMART_INPAINT] START (QUALITY MAX)")
+                        print(
+                            f"[SMART_INPAINT] image={img_w}x{img_h} "
+                            f"requested_mode={requested_mode} effective_mode={INPAINT_MODE} "
+                            f"timeout={SMART_INPAINT_TIMEOUT:.1f}s lama_timeout={LAMA_TIMEOUT:.1f}s max_dim={MAX_DIM}"
+                        )
+                        if auto_reliable_reason:
+                            print(f"[SMART_INPAINT] auto-switch -> reliable: {auto_reliable_reason}")
+
+                        try:
+                            has_sel, x1, y1, x2, y2 = Gimp.Selection.bounds(image)
+                            print(
+                                f"[SMART_INPAINT] selection bounds: has_sel={has_sel} "
+                                f"box=({x1},{y1})-({x2},{y2})"
+                            )
+                        except Exception as e:
+                            print(f"[SMART_INPAINT] selection bounds unavailable: {e}")
 
                         # 1) export image
                         self._safe_png_export(image, drawable, img_path)
@@ -1867,8 +1934,18 @@ class MCPPlugin(Gimp.PlugIn):
                         mask_layer.edit_fill(Gimp.FillType.FOREGROUND)
 
                         # 3) export mask
-                        self._safe_png_export(image, mask_layer, mask_path)
+                        # Force an opaque black/white PNG when possible so the helper
+                        # does not depend on transparency semantics for mask recovery.
+                        self._safe_png_export(
+                            image,
+                            mask_layer,
+                            mask_path,
+                            save_transparency=False,
+                        )
                         image.remove_layer(mask_layer)
+                        print(f"[SMART_INPAINT] mask exported to {mask_path}")
+                        if bool(params.get("debug_keep_mask", False)):
+                            print(f"[SMART_INPAINT] debug_keep_mask enabled: {mask_path}")
 
                         # 4) run LaMa (CAPTURE stdout/stderr)
                         cmd = [
@@ -1878,23 +1955,105 @@ class MCPPlugin(Gimp.PlugIn):
                             "--out",  out_path,
                             "--feather_strength", str(FEATHER_STRENGTH),
                             "--soften_sigma", str(SOFTEN_SIGMA),
+                            "--lama_timeout", str(LAMA_TIMEOUT),
+                            "--opencv_radius", str(OPENCV_RADIUS),
+                            "--inpaint_mode", str(INPAINT_MODE),
+                            "--max_dim", str(MAX_DIM),
                         ]
                         print("[SMART_INPAINT] RUN:", " ".join(cmd))
 
-                        proc = subprocess.run(cmd, capture_output=True, text=True)
-                        if proc.returncode != 0:
-                            # On renvoie une erreur lisible dans la réponse MCP
-                            err = (proc.stderr or "").strip()
-                            out = (proc.stdout or "").strip()
-                            raise RuntimeError(
-                                "LaMa failed.\n"
-                                f"returncode={proc.returncode}\n"
-                                f"stdout:\n{out[-1200:]}\n\n"
-                                f"stderr:\n{err[-1200:]}"
+                        def _parse_inpaint_payload(stdout_text):
+                            lines = [ln.strip() for ln in (stdout_text or "").splitlines() if ln.strip()]
+                            for line in reversed(lines):
+                                try:
+                                    payload = json.loads(line)
+                                    if isinstance(payload, dict):
+                                        return payload
+                                except Exception:
+                                    continue
+                            return None
+
+                        def _classify_process_failure(proc_obj):
+                            payload = {
+                                "status": "error",
+                                "returncode": int(proc_obj.returncode),
+                                "stdout_tail": (proc_obj.stdout or "")[-1200:],
+                                "stderr_tail": (proc_obj.stderr or "")[-1200:],
+                            }
+                            if proc_obj.returncode < 0:
+                                sig_num = -int(proc_obj.returncode)
+                                try:
+                                    sig_name = signal.Signals(sig_num).name
+                                except Exception:
+                                    sig_name = f"SIG{sig_num}"
+                                payload["failure_kind"] = "signal"
+                                payload["signal"] = sig_name
+                            else:
+                                payload["failure_kind"] = "exit_error"
+                            return payload
+
+                        started_at = time.time()
+                        try:
+                            proc = subprocess.run(
+                                cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=SMART_INPAINT_TIMEOUT,
                             )
+                        except subprocess.TimeoutExpired as exc:
+                            elapsed = time.time() - started_at
+                            stdout_tail = ((exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode(errors="ignore"))[-1200:]
+                            stderr_tail = ((exc.stderr or "") if isinstance(exc.stderr, str) else (exc.stderr or b"").decode(errors="ignore"))[-1200:]
+                            print(
+                                f"[SMART_INPAINT] helper timeout after {elapsed:.2f}s "
+                                f"(mode={INPAINT_MODE}, image={img_w}x{img_h})"
+                            )
+                            raise RuntimeError(json.dumps({
+                                "status": "error",
+                                "failure_kind": "timeout",
+                                "timeout_seconds": SMART_INPAINT_TIMEOUT,
+                                "elapsed_seconds": round(float(elapsed), 3),
+                                "requested_mode": requested_mode,
+                                "effective_mode": INPAINT_MODE,
+                                "stdout_tail": stdout_tail,
+                                "stderr_tail": stderr_tail,
+                            }))
+
+                        elapsed = time.time() - started_at
+                        payload = _parse_inpaint_payload(proc.stdout)
+                        if proc.returncode != 0:
+                            print(
+                                f"[SMART_INPAINT] helper failed after {elapsed:.2f}s "
+                                f"returncode={proc.returncode}"
+                            )
+                            raise RuntimeError(json.dumps(payload or _classify_process_failure(proc)))
+
+                        if payload is None:
+                            payload = {
+                                "status": "success",
+                                "engine": "unknown",
+                                "fallback_used": False,
+                                "stdout_tail": (proc.stdout or "")[-1200:],
+                                "stderr_tail": (proc.stderr or "")[-1200:],
+                            }
+                        else:
+                            payload.setdefault("stdout_tail", (proc.stdout or "")[-1200:])
+                            payload.setdefault("stderr_tail", (proc.stderr or "")[-1200:])
+                        payload.setdefault("requested_mode", requested_mode)
+                        payload.setdefault("effective_mode", INPAINT_MODE)
+                        payload.setdefault("plugin_elapsed_seconds", round(float(elapsed), 3))
+
+                        print(
+                            f"[SMART_INPAINT] helper ok after {elapsed:.2f}s "
+                            f"engine={payload.get('engine')} fallback={payload.get('fallback_used')}"
+                        )
 
                         if not os.path.exists(out_path):
-                            raise RuntimeError("LaMa output missing (out.png not found)")
+                            raise RuntimeError(json.dumps({
+                                "status": "error",
+                                "failure_kind": "missing_output",
+                                "details": payload,
+                            }))
 
                         # 5) import result as new layer
                         new_layer = Gimp.file_load_layer(
@@ -2069,15 +2228,20 @@ class MCPPlugin(Gimp.PlugIn):
                         executed.append({
                             "action": name,
                             "status": "ok",
-                            "details": "smart_inpaint QUALITY MAX OK (with captured logs)"
+                            "details": payload
                         })
                         continue
 
                     except Exception as e:
+                        err_payload = None
+                        try:
+                            err_payload = json.loads(str(e))
+                        except Exception:
+                            err_payload = {"status": "error", "error": str(e)}
                         executed.append({
                             "action": name,
                             "status": "error",
-                            "error": str(e)
+                            "error": err_payload
                         })
                         continue
 
@@ -2144,7 +2308,12 @@ class MCPPlugin(Gimp.PlugIn):
         "black": "#000000",
         "yellow": "#FFFF00",
         "orange": "#FFA500",
-        "purple": "#800080"
+        "purple": "#800080",
+        "pink": "#FF69B4",
+        "gray": "#9CA3AF",
+        "grey": "#9CA3AF",
+        "brown": "#8B5E3C",
+        "cyan": "#00BCD4",
     }
 
     def normalize_color(self, col):
@@ -2166,6 +2335,221 @@ class MCPPlugin(Gimp.PlugIn):
             int(h[2:4], 16) / 255.0,
             int(h[4:6], 16) / 255.0
         )
+
+    def _resolve_recolor_rgb(self, params):
+        rgb = params.get("target_rgb")
+        if isinstance(rgb, (list, tuple)) and len(rgb) == 3:
+            try:
+                return tuple(max(0, min(255, int(v))) for v in rgb)
+            except Exception:
+                pass
+
+        target_hex = params.get("target_hex")
+        if isinstance(target_hex, str) and target_hex.strip():
+            rr, gg, bb = self.hex_to_rgb(target_hex.strip())
+            return int(rr * 255), int(gg * 255), int(bb * 255)
+
+        target_color = params.get("target_color")
+        if isinstance(target_color, str) and target_color.strip():
+            rr, gg, bb = self.hex_to_rgb(self.normalize_color(target_color.strip()))
+            return int(rr * 255), int(gg * 255), int(bb * 255)
+
+        hue = float(params.get("hue", 0.0)) / 360.0
+        rr, gg, bb = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+        return int(rr * 255), int(gg * 255), int(bb * 255)
+
+    def _resolve_recolor_layer_mode(self, blend_mode_name):
+        mode = str(blend_mode_name or "overlay").lower().strip()
+        mapping = {
+            "overlay": Gimp.LayerMode.OVERLAY,
+            "softlight": Gimp.LayerMode.SOFTLIGHT,
+            "soft_light": Gimp.LayerMode.SOFTLIGHT,
+            "soft-light": Gimp.LayerMode.SOFTLIGHT,
+            "color": Gimp.LayerMode.HSL_COLOR,
+            "hsl_color": Gimp.LayerMode.HSL_COLOR,
+            "hsl-color": Gimp.LayerMode.HSL_COLOR,
+        }
+        return mapping.get(mode, Gimp.LayerMode.OVERLAY), mode
+
+    def _apply_overlay_recolor(self, image, drawable, params):
+        from gi.repository import Gimp, Gegl
+
+        def _parse_selection_bounds(raw_bounds):
+            parsed = None
+            has_sel = None
+
+            if isinstance(raw_bounds, (list, tuple)):
+                if len(raw_bounds) >= 5:
+                    has_sel = bool(raw_bounds[0])
+                    try:
+                        parsed = [int(v) for v in raw_bounds[-4:]]
+                    except Exception:
+                        parsed = None
+                elif len(raw_bounds) == 4:
+                    has_sel = True
+                    try:
+                        parsed = [int(v) for v in raw_bounds]
+                    except Exception:
+                        parsed = None
+            else:
+                try:
+                    if hasattr(raw_bounds, "non_empty"):
+                        has_sel = bool(raw_bounds.non_empty)
+                    elif hasattr(raw_bounds, "is_empty"):
+                        has_sel = not bool(raw_bounds.is_empty)
+                except Exception:
+                    has_sel = None
+
+                coords = []
+                for name in ("x1", "y1", "x2", "y2"):
+                    if hasattr(raw_bounds, name):
+                        try:
+                            coords.append(int(getattr(raw_bounds, name)))
+                        except Exception:
+                            coords.append(None)
+                if len(coords) == 4 and all(v is not None for v in coords):
+                    parsed = coords
+
+            return has_sel, parsed
+
+        requested_mode = str(params.get("recolor_mode", "overlay")).lower().strip()
+        rgb = self._resolve_recolor_rgb(params)
+        color_hex = "#{:02X}{:02X}{:02X}".format(*rgb)
+        debug_mode = requested_mode != "realistic"
+        if debug_mode:
+            opacity = 60.0
+            layer_mode = Gimp.LayerMode.NORMAL
+            blend_mode_used = "normal"
+            layer_name = "recolor_overlay_blue_debug"
+        else:
+            opacity = float(params.get("opacity", 72.0))
+            opacity = max(0.0, min(100.0, opacity))
+            layer_mode, blend_mode_used = self._resolve_recolor_layer_mode(params.get("blend_mode", "overlay"))
+            layer_name = "recolor_overlay_realistic"
+
+        raw_bounds = None
+        selection_bounds = None
+        selection_empty = False
+        try:
+            raw_bounds = Gimp.Selection.bounds(image)
+        except Exception as bounds_error:
+            print(f"⚠️ [OVERLAY recolor] selection bounds unavailable: {bounds_error}")
+
+        has_sel, selection_bounds = _parse_selection_bounds(raw_bounds)
+
+        try:
+            selection_empty = bool(Gimp.Selection.is_empty(image))
+        except Exception as empty_error:
+            print(f"⚠️ [OVERLAY recolor] selection is_empty unavailable: {empty_error}")
+            selection_empty = has_sel is False
+
+        if selection_bounds is not None:
+            x1, y1, x2, y2 = selection_bounds
+            if (x2 - x1) <= 1 or (y2 - y1) <= 1:
+                selection_empty = True
+
+        print(
+            "🎨 [OVERLAY recolor] "
+            f"raw_bounds={raw_bounds!r} raw_bounds_type={type(raw_bounds)} "
+            f"parsed_bounds={selection_bounds} selection_empty={selection_empty}"
+        )
+
+        drawable_position = int(image.get_item_position(drawable))
+        overlay_layer = Gimp.Layer.new(
+            image,
+            layer_name,
+            image.get_width(),
+            image.get_height(),
+            Gimp.ImageType.RGBA_IMAGE,
+            opacity,
+            layer_mode
+        )
+        image.insert_layer(overlay_layer, None, drawable_position)
+
+        print(
+            "🎨 [OVERLAY recolor] "
+            f"requested_mode={requested_mode} effective_mode={blend_mode_used} "
+            f"opacity={opacity:.0f} rgb={rgb} parsed_bounds={selection_bounds} "
+            f"selection_empty={selection_empty} drawable_pos={drawable_position} "
+            f"overlay_layer={overlay_layer.get_name()}"
+        )
+
+        Gimp.context_push()
+        try:
+            fill_applied = False
+            Gimp.context_set_foreground(Gegl.Color.new(color_hex))
+            overlay_layer.edit_fill(Gimp.FillType.FOREGROUND)
+            fill_applied = True
+            overlay_layer.set_mode(layer_mode)
+            overlay_layer.set_opacity(opacity)
+
+            print(
+                "🎨 [OVERLAY recolor] "
+                f"fill_applied={fill_applied} layer_mode={blend_mode_used} "
+                f"layer_opacity={overlay_layer.get_opacity():.0f}"
+            )
+
+            selection_mask_applied = False
+            mask_creation_failed = False
+            if not selection_empty:
+                try:
+                    mask_obj = overlay_layer.create_mask(Gimp.AddMaskType.SELECTION)
+                    overlay_layer.add_mask(mask_obj)
+                    selection_mask_applied = True
+                except Exception as mask_error:
+                    mask_creation_failed = True
+                    print(f"⚠️ [OVERLAY recolor] selection mask skipped: {mask_error}")
+                    if debug_mode:
+                        overlay_layer.set_opacity(30.0)
+                        opacity = 30.0
+            else:
+                print("⚠️ [OVERLAY recolor] selection reported empty, keeping full overlay visible for debug")
+                if debug_mode:
+                    overlay_layer.set_opacity(30.0)
+                    opacity = 30.0
+
+            print(
+                "🎨 [OVERLAY recolor] "
+                f"selection_mask_applied={selection_mask_applied} mask_creation_failed={mask_creation_failed}"
+            )
+
+            merged = False
+            overlay_kept_visible = True
+            print(
+                "🎨 [OVERLAY recolor] "
+                f"merge_performed={merged} overlay_kept_visible={overlay_kept_visible}"
+            )
+
+            try:
+                image.set_selected_layers([overlay_layer])
+            except Exception:
+                pass
+
+            try:
+                overlay_layer.update(0, 0, overlay_layer.get_width(), overlay_layer.get_height())
+            except Exception:
+                pass
+
+            Gimp.displays_flush()
+
+            return overlay_layer, {
+                "raw_bounds": repr(raw_bounds),
+                "parsed_bounds": selection_bounds,
+                "selection_empty": selection_empty,
+                "blend_mode": blend_mode_used,
+                "opacity": opacity,
+                "rgb": rgb,
+                "hex": color_hex,
+                "fill_applied": fill_applied,
+                "selection_mask_applied": selection_mask_applied,
+                "mask_created": selection_mask_applied,
+                "overlay_kept_visible": overlay_kept_visible,
+                "overlay_visible": overlay_kept_visible,
+                "merged": merged,
+                "mode": blend_mode_used.upper(),
+            }
+        finally:
+            Gimp.context_pop()
 
     def _draw_circle(self, image, drawable, params):
         """
@@ -2292,5 +2676,3 @@ class MCPPlugin(Gimp.PlugIn):
 
 
 Gimp.main(MCPPlugin.__gtype__, sys.argv)
-
-

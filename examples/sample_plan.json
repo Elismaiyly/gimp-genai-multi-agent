@@ -1,0 +1,18 @@
+{
+  "mode": "plan",
+  "plan": {
+    "actions": [
+      {
+        "action": "object.recolor",
+        "params": {
+          "object": "jacket",
+          "color": "red"
+        }
+      },
+      {
+        "action": "gimp.selection.clear",
+        "params": {}
+      }
+    ]
+  }
+}

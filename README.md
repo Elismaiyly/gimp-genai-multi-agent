@@ -1,330 +1,259 @@
-# GIMP MCP
+# GIMP GenAI Multi-Agent Pipeline
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Works with Claude Desktop](https://img.shields.io/badge/Works%20with-Claude%20Desktop-7B2CBF.svg)](https://claude.ai/desktop)
-[![GIMP 3.0](https://img.shields.io/badge/GIMP-3.0-orange.svg)](https://gimp.org)
-[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
+[![Python](https://img.shields.io/badge/Python-3.11+-1f6feb.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Service-05998b.svg)](https://fastapi.tiangolo.com/)
+[![GIMP](https://img.shields.io/badge/GIMP-3.0-orange.svg)](https://www.gimp.org/)
+[![Transformers](https://img.shields.io/badge/Hugging%20Face-Transformers-f59e0b.svg)](https://huggingface.co/docs/transformers/index)
 
-## Overview
+Natural-language image editing for GIMP, powered by a multi-agent GenAI pipeline. The system translates a user instruction into a structured plan, validates it, calls vision services for segmentation, and executes the final actions inside GIMP.
 
-This project enables non-technical users to edit images with GIMP through simple conversational commands, bridging the gap between GIMP's powerful capabilities and natural language interaction. It also allows professionals to execute complex multi-step workflows faster than traditional point-and-click methods.
+This repository is being prepared as a clean GitHub portfolio version: the runtime pipeline stays intact, while documentation, repository hygiene, examples, and a presentation frontend are added around it.
 
-Users can describe what they want to achieve - from basic photo adjustments to sophisticated artistic modifications. For example, "brighten the background and add a vintage filter" or "remove the red-eye and sharpen the subject" - and the system translates these requests into precise GIMP operations.
+## Project Summary
 
-The project is fully functional and exposes all GIMP features via MCP (Model Context Protocol). **New in this version**: MCP-compliant image export that allows AI assistants like Claude to directly view and analyze your GIMP images!
+The project turns prompts such as:
 
-## Key Features
-
-✨ **MCP-Compliant Image Export**: Direct image viewing for AI assistants  
-🎨 **Full GIMP 3.0 API Access**: Execute any GIMP operation via PyGObject  
-🔧 **Multi-Format Export**: PNG, JPEG, BMP, TIFF with quality control  
-📊 **Image Metadata**: Get image info without transferring data  
-🛡️ **Robust Error Handling**: Multiple fallback methods for reliability  
-🔌 **Universal MCP Support**: Works with Claude Desktop, Gemini CLI, PydanticAI, and more
-
-
-## Prerequisites
-* **GIMP 3.0 and above:** This project is developed and tested with GIMP 3.0. Earlier versions are not supported.
-* **MCP-compatible AI client:** Claude Desktop, Gemini CLI, PydanticAI, or other MCP clients.
-* **Python 3.8+:** Required for the MCP server.
-* **uv:** A modern Python package installer and resolver.
-
-## Quick Start
-
-### 1. Install Dependencies
-```bash
-# Clone the repository
-git clone https://github.com/maorcc/gimp-mcp.git
-cd gimp-mcp
-
-# Install Python dependencies
-uv sync
+```text
+"Change the rider's jacket to red and blur the background."
 ```
 
-### 2. Install the GIMP Plugin
+into an execution chain:
 
-Copy the `gimp-mcp-plugin.py` to your GIMP `plug-ins` directory and make it executable.
-
-**Quick Install (Linux):**
-```bash
-# For standard GIMP installation
-mkdir -p ~/.config/GIMP/3.0/plug-ins/gimp-mcp-plugin
-cp gimp-mcp-plugin.py ~/.config/GIMP/3.0/plug-ins/gimp-mcp-plugin/
-chmod +x ~/.config/GIMP/3.0/plug-ins/gimp-mcp-plugin/gimp-mcp-plugin.py
-
-# For Snap-installed GIMP
-mkdir -p ~/snap/gimp/current/.config/GIMP/3.0/plug-ins/gimp-mcp-plugin
-cp gimp-mcp-plugin.py ~/snap/gimp/current/.config/GIMP/3.0/plug-ins/gimp-mcp-plugin/
-chmod +x ~/snap/gimp/current/.config/GIMP/3.0/plug-ins/gimp-mcp-plugin/gimp-mcp-plugin.py
+```text
+User
+  -> StudentGimpAgent
+  -> TranslatorAgent
+  -> ExecutorAgent
+  -> Vision Agent
+  -> GIMP Plugin
+  -> Final Image
 ```
 
-**Quick Install (macOS):**
-```bash
-mkdir -p ~/Library/Application\ Support/GIMP/3.0/plug-ins/gimp-mcp-plugin
-cp gimp-mcp-plugin.py ~/Library/Application\ Support/GIMP/3.0/plug-ins/gimp-mcp-plugin/
-chmod +x ~/Library/Application\ Support/GIMP/3.0/plug-ins/gimp-mcp-plugin/gimp-mcp-plugin.py
+It combines LLM-based planning, IR normalization, object-aware segmentation, mask refinement, and GIMP action execution through local TCP/JSON and HTTP/JSON communication.
+
+## Architecture
+
+### Current Runtime Components
+
+- `run_cli.py`: CLI orchestrator for the end-to-end demo pipeline.
+- `app/student_model/student_agent.py`: student LLM agent that emits structured JSON editing plans.
+- `app/student_model/student_postprocess.py`: plan normalization and recovery rules.
+- `app/agents/translator_agent.py`: converts normalized plan messages into executor-oriented IR.
+- `app/executor/ir_translator.py`: IR V3 translation and validation logic.
+- `app/agents/executor_agent.py`: bridges translated IR to executor actions.
+- `app/executor/gimp_executor.py`: calls vision, refines masks, and compiles GIMP actions.
+- `vision_agent_a2a.py`: vision service and A2A endpoint.
+- `send_actions_to_gimp.py`: sends JSON actions to the GIMP plugin.
+- `gimp-mcp-plugin.py`: plugin side inside GIMP.
+
+### Repository Structure Target
+
+The current codebase is functional but still research-oriented. The recommended GitHub-facing structure is documented in [docs/repository-structure.md](docs/repository-structure.md) and separates:
+
+- `backend/`: Python API and orchestration layer
+- `agents/`: planning, translation, executor, and dialog agents
+- `vision-service/`: detection, segmentation, inpainting, A2A endpoints
+- `gimp-plugin/`: plugin-side transport and execution bridge
+- `frontend/`: demo UI
+- `docs/`: architecture, setup notes, publication checklist
+- `examples/`: prompts, sample JSON, screenshots
+- `scripts/`: helper utilities
+- `tests/`: automated validation
+
+For now, this repository keeps the existing paths to avoid breaking imports and local execution.
+
+## Pipeline
+
+1. The user writes a natural-language editing command.
+2. `StudentGimpAgent` produces a structured JSON response.
+3. `student_postprocess` normalizes ambiguous or incomplete plans.
+4. `TranslatorAgent` and IR translation convert the plan into executable actions.
+5. `GimpExecutor` requests object localization and masks from the vision agent.
+6. Mask refinement is applied before action compilation.
+7. Actions are sent to the GIMP plugin through JSON over TCP.
+8. GIMP executes the edits and returns the result status.
+
+## Features
+
+- Natural-language control of GIMP editing workflows
+- Multi-agent orchestration from prompt to executable action plan
+- Structured JSON planning and normalization
+- Vision-guided object segmentation and mask refinement
+- GIMP plugin integration through local transport
+- Extensible protocol layers using MCP and A2A concepts
+- Research-friendly architecture for training and evaluating planning agents
+
+## Technology Stack
+
+- Python
+- FastAPI
+- PyTorch
+- Hugging Face Transformers
+- PEFT / LoRA
+- YOLOv8
+- SAM
+- OWL-ViT
+- LaMa
+- GIMP Python API
+- TCP/JSON
+- HTTP/JSON
+- MCP
+- A2A
+
+## Repository Layout
+
+```text
+.
+├── app/                    # Current Python application code
+├── docs/                   # GitHub-facing documentation
+├── examples/               # Prompt and JSON examples
+├── frontend/               # Static demo UI
+├── scripts/                # Publication and utility scripts
+├── run_cli.py              # Main local CLI demo
+├── vision_agent_a2a.py     # Vision service
+├── gimp-mcp-plugin.py      # GIMP plugin
+└── send_actions_to_gimp.py # GIMP transport bridge
 ```
 
-**Manual Installation:**
+## Installation
 
-For detailed instructions on locating your GIMP plugins folder across different operating systems, please refer to this guide:
+### Prerequisites
 
-[**GIMP Plugin Installation Guide (Wikibooks)**](https://en.wikibooks.org/wiki/GIMP/Installing_Plugins)
+- Python `3.11+`
+- GIMP `3.x`
+- A local environment capable of running the vision stack
+- Access to the required model weights outside Git tracking
 
-Make sure the plugin file has "execute" permission.
+### Local Setup
 
-**Restart GIMP** after installation.
+```bash
+git clone <your-repository-url>
+cd gimp-mcp-backup
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e .
+```
 
-### 3. Start the MCP Server in GIMP
-1. Open any image in GIMP
-2. Navigate to **Tools > Start MCP Server** 
-3. The server will start on `localhost:9877`
+Additional runtime dependencies for the full vision stack may need to be installed separately depending on your local setup and model choices.
 
-### 4. Configure Your MCP Client
-#### Claude Desktop
-Add these lines to your Claude Desktop configuration file:  
-**Location**: `~/.config/Claude/claude_desktop_config.json` (Linux/macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
+## Running the Project
+
+### 1. Start the vision service
+
+```bash
+python vision_agent_a2a.py
+```
+
+### 2. Ensure the GIMP plugin is installed
+
+Install `gimp-mcp-plugin.py` in your local GIMP plug-ins directory, then launch GIMP.
+
+### 3. Start the CLI demo
+
+```bash
+python run_cli.py
+```
+
+### 4. Open the demo frontend
+
+```bash
+python -m http.server 8080 --directory frontend
+```
+
+Then open `http://localhost:8080`.
+
+## Example Commands
+
+Examples are also collected in [examples/commands.md](examples/commands.md).
+
+```text
+Change the rider's jacket to red.
+Remove the helmet from the subject.
+Blur the background while keeping the person sharp.
+Replace the shirt color with dark blue.
+Desaturate the full image and sharpen the main object.
+```
+
+## Example JSON Plan
+
+Examples are also collected in [examples/sample_plan.json](examples/sample_plan.json).
 
 ```json
 {
-  "mcpServers": {
-    "gimp": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/full/path/to/gimp-mcp",
-        "gimp_mcp_server.py"
-      ]
-    }
-  }
-}
-```
-
-#### Gemini CLI
-Configure your Gemini CLI MCP server in `~/.config/gemini/.gemini_config.json`:
-```json
-{
-  "mcpServers": {
-    "gimp": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/full/path/to/gimp-mcp",
-        "gimp_mcp_server.py"
-      ]
-    }
-  }
-}
-```
-
-#### PydanticAI
-For PydanticAI agents, use the MCPServerStdio class:
-```python
-from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
-
-server = MCPServerStdio(
-    'uv',
-    args=[
-        'run',
-        '--directory',
-        '/full/path/to/gimp-mcp',
-        'gimp_mcp_server.py'
+  "mode": "plan",
+  "plan": {
+    "actions": [
+      {
+        "action": "object.recolor",
+        "params": {
+          "object": "jacket",
+          "color": "red"
+        }
+      }
     ]
-)
-
-agent = Agent('openai:gpt-4o', mcp_servers=[server])
+  }
+}
 ```
 
-#### Other MCP Clients
-For other MCP clients that support stdio transport, use the command:
+## Screenshots and Results
+
+Portfolio assets can be placed in `docs/assets/` or `examples/results/` and linked here.
+
+Suggested captures:
+
+- input image before editing
+- generated plan JSON
+- segmentation mask preview
+- GIMP result after execution
+- frontend demo screen
+
+The current frontend already includes a placeholder showcase layout for before/after comparison and JSON visualization.
+
+## Frontend Demo
+
+The static demo UI in `frontend/` is designed for GitHub portfolio presentation. It includes:
+
+- landing page with project positioning
+- command input panel
+- before/after preview cards
+- generated JSON panel
+- visible pipeline stages
+
+It is intentionally decoupled from the current runtime so it does not interfere with the existing Python pipeline.
+
+## Documentation
+
+- [docs/repository-structure.md](docs/repository-structure.md): recommended repository organization
+- [docs/publishing-checklist.md](docs/publishing-checklist.md): pre-publication hygiene checklist
+
+## Publication Safety
+
+Before pushing to GitHub, run:
+
 ```bash
-uv run --directory /full/path/to/gimp-mcp gimp_mcp_server.py
+bash scripts/check_publishability.sh
 ```
 
-## Usage Examples
+This scans for common risks such as:
 
-### Basic Usage
-1. **Start GIMP** and open any image
-2. **Start MCP Server**: Tools > Start MCP Server  
-3. **Launch your MCP client** (Claude Desktop, etc.)
-4. **Start creating**: "Draw a face and a sheep with GIMP"
+- hardcoded personal paths
+- API key patterns
+- local environment files
+- heavy checkpoints and generated artifacts
 
-### Advanced Features
+## Roadmap
 
-#### Image Analysis
-```
-"Can you show me the current image in GIMP and tell me what you see?"
-```
-*Uses `get_image_bitmap()` to retrieve and analyze the current canvas*
+- Externalize hardcoded local paths into environment-based configuration
+- Add a proper FastAPI backend entrypoint for the full multi-agent pipeline
+- Expose the demo frontend to the live pipeline
+- Add reproducible Docker-based setup for vision services
+- Publish curated examples and benchmark tasks
+- Expand automated tests for segmentation and plugin integration
+- Separate research assets from product-facing source tree
 
-#### Fast Image Information
-```
-"What are the dimensions and properties of the current image?"
-```
-*Uses `get_image_metadata()` to quickly get image info without transferring bitmap data*
+## Notes
 
-#### Smart Workflow Decisions
-```
-"Check if the current image has transparency and multiple layers before applying the effect"
-```
-*Uses `get_image_metadata()` to analyze image structure for intelligent decision making*
-
-#### Environment Discovery
-```
-"What version of GIMP am I working with and what features are available?"
-```
-*Uses `get_gimp_info()` to provide comprehensive environment information for optimal support*
-
-#### Troubleshooting Support
-```
-"I'm having issues with plugin exports - check my GIMP setup and suggest solutions"
-```
-*Uses `get_gimp_info()` to diagnose installation and configuration problems*
-
-#### Complex Workflows
-```
-"Create a new 800x600 image, draw a blue circle in the center, add a red border, then show me the result"
-```
-*Combines multiple GIMP operations with image export for verification*
-
-## Available MCP Tools
-
-The GIMP MCP server provides several tools that AI assistants can use:
-
-### 🖼️ Image Export Tools
-- **`get_image_bitmap()`**
-
-Returns the current image as a base64-encoded PNG bitmap with support for region extraction and scaling.
-
-**Parameters:**
-- `max_width` (optional): Maximum width for full image scaling
-- `max_height` (optional): Maximum height for full image scaling  
-- `region` (optional): Dictionary for region extraction with keys:
-  - `origin_x`: X coordinate of region top-left corner
-  - `origin_y`: Y coordinate of region top-left corner  
-  - `width`: Width of region to extract
-  - `height`: Height of region to extract
-  - `max_width`: Maximum width for region scaling (optional)
-  - `max_height`: Maximum height for region scaling (optional)
-
-**Usage Examples:**
-
-```python
-# Get full image bitmap
-result = await client.get_image_bitmap()
-
-# Get full image scaled to max 800x600 (preserves aspect ratio)
-result = await client.get_image_bitmap(max_width=800, max_height=600)
-
-# Extract a region (100,100) with size 400x300
-result = await client.get_image_bitmap(
-    region={"origin_x": 100, "origin_y": 100, "width": 400, "height": 300}
-)
-
-# Extract region and scale it to 200x150 (preserves aspect ratio)
-result = await client.get_image_bitmap(
-    region={
-        "origin_x": 100, "origin_y": 100, "width": 400, "height": 300,
-        "max_width": 200, "max_height": 150
-    }
-)
-
-if result['status'] == 'success':
-    image_data = result['results']['image_data']  # base64-encoded PNG
-    width = result['results']['width']
-    height = result['results']['height']
-    original_width = result['results']['original_width']
-    original_height = result['results']['original_height']
-    processing = result['results']['processing_applied']
-
-- **`get_image_metadata()`**: Get comprehensive image metadata without bitmap data (fast)
-
-### 🔍 System Information Tools
-- **`get_gimp_info()`**: Get comprehensive GIMP installation and environment information
-- **`get_context_state()`**: Get current GIMP context state (colors, brush, feathering, opacity)
-
-Returns current GIMP context state including foreground/background colors, brush, opacity, paint mode, feather settings, and antialiasing state.
-
-### 🔧 API Access Tool  
-- **`call_api(api_path, args, kwargs)`**: Execute any GIMP 3.0 PyGObject command
-
-### 🎨 Common Operations Available
-- Create new images and layers
-- Draw shapes, lines, and curves  
-- Apply filters and effects
-- Adjust colors and brightness
-- Add text and selections
-- Copy/paste between images
-- Export in various formats
-
-For detailed API documentation, see [GIMP_MCP_PROTOCOL.md](GIMP_MCP_PROTOCOL.md).
-
-## Technical Architecture
-
-### MCP Compliance
-- **Image Content**: Returns proper `ImageContent` objects with base64 data and MIME types
-- **Error Handling**: Uses MCP-standard exception propagation  
-- **Tool Metadata**: Comprehensive tool descriptions and parameter schemas
-- **Protocol Version**: Compatible with MCP specification 2025-06-18
-
-### GIMP 3.0 Integration
-- **PyGObject API**: Direct access to GIMP's Python bindings
-- **Persistent Context**: Command execution maintains state between calls
-- **Robust Export**: Multiple fallback methods for reliable image export
-- **Real-time Updates**: Immediate display refresh with `Gimp.displays_flush()`
-
-## Troubleshooting
-
-### Common Issues
-
-#### "Could not connect to GIMP"
-- Ensure GIMP is running with an open image
-- Verify the MCP Server is started (Tools > Start MCP Server)
-- Check that port 9877 is not blocked by firewall
-
-#### Export Errors
-- The plugin includes multiple fallback export methods
-- Supports various GIMP 3.0 API versions
-- Automatically handles missing export procedures
-
-#### Plugin Not Visible
-- Verify plugin is in correct directory with execute permissions
-- Restart GIMP after installation
-- Check GIMP's error console for plugin loading issues
-
-### Debug Mode
-Add debug logging to see detailed MCP communication:
-```bash
-GIMP_MCP_DEBUG=1 uv run --directory /path/to/gimp-mcp gimp_mcp_server.py
-```
-
-## Example Output
-
-<img src="gimp-screenshot1.png" alt="GIMP MCP Example" width="400">
-
-*Example output from the prompt "draw me a face and a sheep" using GIMP MCP*
-
-## Future Enhancements
-
-We welcome contributions! Here are some areas for improvement:
-
-### Planned Features
-- **📚 Recipe Collection**: Common GIMP workflows as reusable MCP tools
-- **↩️ Undo System**: History management and rollback capabilities  
-- **🔍 Visual Feedback**: Enhanced progress indicators and operation previews
-- **🚀 Dynamic Discovery**: Auto-generate MCP tools from GIMP's procedure database
-- **📝 Enhanced Errors**: Context-aware error messages with suggested fixes
-- **🛡️ Resource Management**: Better cleanup and error recovery in the plugin
-
-### Architecture Improvements
-- **🔒 Security**: Sandboxed execution environment for user commands
-- **⚡ Performance**: Optimized image transfer for large files
-- **🌐 Remote Access**: Support for network-accessible GIMP instances
-- **📊 Analytics**: Usage metrics and performance monitoring
-
-## Contributing
-
-Contributions are welcome! Whether it's bug fixes, new features, or documentation improvements, feel free to submit a Pull Request or open an issue.
+- Heavy model weights, checkpoints, virtual environments, local outputs, and private datasets should not be committed.
+- Several research and local utility scripts still exist in the repository; they should be curated progressively rather than moved blindly.
+- The current portfolio cleanup intentionally avoids changing the core runtime layout to prevent regressions.

@@ -1,34 +1,91 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
-# Environnements
-venv/
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
 .venv/
+venv/
+env/
 venv-iopaint/
+lama/venv/
+pipeline/venv_sd/
 
-# modèles IA
+# Local editor / tooling
+.idea/
+.vscode/
+.claude/
+.codex
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets and environment files
+.env
+.env.*
+*.env
+secrets.json
+credentials.json
+
+# Large models and checkpoints
 *.pt
 *.pth
 *.ckpt
-
-# dossiers lourds
-lama/
-sam/
+*.bin
+*.safetensors
+*.onnx
+checkpoints/
+**/checkpoint-*/
+app/student_model/qwen_gimp_student_lora_colab/
+app/student_model/qwen_gimp_student_v6/
+qwen_gimp_student_lora_cpu/
+lama/models/
+lama/pretrained/
+sam/checkpoints/
 Segmentation_Instance/
-pipeline/
 
-# datasets
+# Research datasets and archives
 data/
 datasets/
+dataset*.jsonl
+dataset*.zip
+train.jsonl
+test.jsonl
+val.jsonl
 
-# outputs
+# Runtime outputs and temporary images
 outputs/
+pipeline/outputs/
+iopaint_test/out/
+iopaint_test/mask/
+tmp/
+temp/
+*.tmp
+*.log
 
-# IDE
-.idea/
-.vscode/
+# Local experiment directories
+lama/outputs/
 
-# macOS
-.DS_Store
+# Optional service caches
+.cache/
+
+# Frontend local dependencies
+node_modules/
+
+# Generated screenshots or masks
+*.mask.png
+*.result.png

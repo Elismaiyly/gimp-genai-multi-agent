@@ -4,7 +4,7 @@
 Traduit les actions de l'Agent V3 en actions compatibles avec l'Executor
 """
 
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, Optional
 
 
 class IRTranslator:
@@ -16,6 +16,8 @@ class IRTranslator:
         "effect.blur": "gimp.filter.gaussian_blur",
         "effect.sharpen": "gimp.filter.sharpen",
         "effect.noise": "gimp.filter.add_noise",
+        "object.highlight": "object.highlight",
+        "smart.edit": "smart.edit",
         
         # Filtres -> Filtres GIMP
         "filter.vintage": "gimp.filter.desaturate",  # simplifié
@@ -65,15 +67,17 @@ class IRTranslator:
         "fx.bokeh": "gimp.filter.gaussian_blur",
         "fx.chromatic": None,
         
-        # Arrière-plan
+      # Arrière-plan
+        "background.blur": "background.blur",
         "background.remove": None,
-        "background.replace": None,
+        "background.replace": "background.replace",
     }
         # Normalisation objets (synonymes FR/EN -> labels attendus)
     OBJECT_SYNONYMS = {
         # véhicules
         # véhicules (COCO)
         "moto": "motorcycle",
+        "motocyclette": "motorcycle",
         "motorbike": "motorcycle",
         "motorcycle": "motorcycle",
         "scooter": "motorcycle",
@@ -99,16 +103,58 @@ class IRTranslator:
 
         "casque": "helmet",
         "helmet": "helmet",
-        "hat": "hat",
+        "hat": "helmet",
 
         "gants": "gloves",
         "gant": "gloves",
         "gloves": "gloves",
+
+        "personne": "person",
+        "person": "person",
+        "people": "person",
+        "human": "person",
+        "humain": "person",
+
+        "objet": "object",
+        "object": "object",
+        "item": "object",
+    }
+
+    INSTANCE_STRATEGY_SYNONYMS = {
+        "left": "left",
+        "gauche": "left",
+        "right": "right",
+        "droite": "right",
+        "center": "center",
+        "centre": "center",
+        "middle": "center",
+        "milieu": "center",
     }
 
     def _normalize_object_label(self, obj: str) -> str:
         o = (obj or "").lower().strip()
+        o = self._strip_leading_article(o)
         return self.OBJECT_SYNONYMS.get(o, o)
+
+    @staticmethod
+    def _strip_leading_article(text: str) -> str:
+        import re
+        return re.sub(
+            r"^(?:de\s+la\s+|de\s+l[\'’]|de\s+|le\s+|la\s+|les\s+|l[\'’]|un\s+|une\s+|des\s+|du\s+|the\s+|a\s+|an\s+)",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    def _normalize_instance(self, instance: Any) -> Dict[str, Any]:
+        if not isinstance(instance, dict):
+            return {}
+
+        out = dict(instance)
+        strategy = str(out.get("strategy", "")).lower().strip()
+        if strategy:
+            out["strategy"] = self.INSTANCE_STRATEGY_SYNONYMS.get(strategy, strategy)
+        return out
 
     
     def translate(self, ir_v3: Dict[str, Any]) -> Dict[str, Any]:
@@ -205,11 +251,36 @@ class IRTranslator:
         
         # Actions objets : passthrough
         # Actions objets : passthrough + normalisation objet
-        if action_name in ("object.recolor", "object.remove"):
+        if action_name in ("object.recolor", "object.remove", "object.highlight"):
             out = dict(params)
             if "object" in out:
                 out["object"] = self._normalize_object_label(out["object"])
+            if "instance" in out:
+                out["instance"] = self._normalize_instance(out["instance"])
             return out
-        
+
+        if action_name == "background.blur":
+            out = dict(params)
+            if "instance" in out:
+                out["instance"] = self._normalize_instance(out["instance"])
+            return out
+
+        if action_name == "background.replace":
+            out = dict(params)
+            out["object"] = self._normalize_object_label(out.get("object", "person"))
+            if "color" in out:
+                out["color"] = str(out["color"]).strip()
+            if "instance" in out:
+                out["instance"] = self._normalize_instance(out["instance"])
+            return out
+
+        if action_name == "smart.edit":
+            out = dict(params)
+            if "object" in out:
+                out["object"] = self._normalize_object_label(out["object"])
+            if "instance" in out:
+                out["instance"] = self._normalize_instance(out["instance"])
+            return out
+
         # Défaut : passthrough
         return params

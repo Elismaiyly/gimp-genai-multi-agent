@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GIMP GenAI Pipeline</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Natural-language control for GIMP</p>
+          <h1>Multi-agent image editing, from prompt to final canvas.</h1>
+          <p class="lead">
+            A portfolio-ready showcase for a GenAI system that plans, translates,
+            segments, and executes visual edits inside GIMP.
+          </p>
+          <div class="hero-metrics">
+            <div>
+              <span>Pipeline</span>
+              <strong>6 agents / services</strong>
+            </div>
+            <div>
+              <span>Transport</span>
+              <strong>HTTP, TCP, JSON, MCP</strong>
+            </div>
+            <div>
+              <span>Stack</span>
+              <strong>Python, FastAPI, PyTorch</strong>
+            </div>
+          </div>
+        </div>
+        <div class="hero-panel">
+          <div class="panel-label">Sample command</div>
+          <div class="hero-command">
+            Change the rider's jacket to red and keep the helmet unchanged.
+          </div>
+          <div class="panel-label">Generated intent</div>
+          <pre class="hero-json">{
+  "mode": "plan",
+  "plan": {
+    "actions": [
+      {
+        "action": "object.recolor",
+        "params": {
+          "object": "jacket",
+          "color": "red"
+        }
+      }
+    ]
+  }
+}</pre>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card command-card">
+          <div class="section-head">
+            <p class="section-kicker">Demo command</p>
+            <h2>Prompt to structured edit plan</h2>
+          </div>
+          <label class="field-label" for="commandInput">User command</label>
+          <textarea id="commandInput" rows="4">Change the rider's jacket to red and blur the background.</textarea>
+          <button id="generateButton" type="button">Generate demo JSON</button>
+        </section>
+
+        <section class="card json-card">
+          <div class="section-head">
+            <p class="section-kicker">Structured output</p>
+            <h2>Generated JSON</h2>
+          </div>
+          <pre id="jsonOutput"></pre>
+        </section>
+
+        <section class="card visuals-card">
+          <div class="section-head">
+            <p class="section-kicker">Visual result</p>
+            <h2>Before / after preview</h2>
+          </div>
+          <div class="upload-row">
+            <label class="upload-box">
+              <span>Load before image</span>
+              <input id="beforeInput" type="file" accept="image/*" />
+            </label>
+            <label class="upload-box">
+              <span>Load after image</span>
+              <input id="afterInput" type="file" accept="image/*" />
+            </label>
+          </div>
+          <div class="image-grid">
+            <figure>
+              <img
+                id="beforePreview"
+                alt="Before preview"
+                src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='800' height='520'><rect width='100%' height='100%' fill='%23d9e6e1'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%23252f2c' font-family='Arial' font-size='32'>Before image</text></svg>"
+              />
+              <figcaption>Before</figcaption>
+            </figure>
+            <figure>
+              <img
+                id="afterPreview"
+                alt="After preview"
+                src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='800' height='520'><rect width='100%' height='100%' fill='%2317252a'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='%23f4ede1' font-family='Arial' font-size='32'>After image</text></svg>"
+              />
+              <figcaption>After</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="card pipeline-card">
+          <div class="section-head">
+            <p class="section-kicker">Execution chain</p>
+            <h2>Agents and services</h2>
+          </div>
+          <div class="pipeline-track">
+            <div class="stage">
+              <span>1</span>
+              <strong>User</strong>
+              <small>Natural-language request</small>
+            </div>
+            <div class="stage">
+              <span>2</span>
+              <strong>StudentGimpAgent</strong>
+              <small>Plan generation</small>
+            </div>
+            <div class="stage">
+              <span>3</span>
+              <strong>TranslatorAgent</strong>
+              <small>IR translation</small>
+            </div>
+            <div class="stage">
+              <span>4</span>
+              <strong>ExecutorAgent</strong>
+              <small>Action orchestration</small>
+            </div>
+            <div class="stage">
+              <span>5</span>
+              <strong>Vision Agent</strong>
+              <small>Segmentation and masks</small>
+            </div>
+            <div class="stage">
+              <span>6</span>
+              <strong>GIMP Plugin</strong>
+              <small>Canvas execution</small>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

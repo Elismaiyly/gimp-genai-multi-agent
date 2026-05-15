@@ -6,7 +6,7 @@ GIMP_HOST = "localhost"
 GIMP_PORT = 9877
 
 
-def send_to_gimp(payload: dict, timeout_sec: int = 30) -> dict:
+def send_to_gimp(payload: dict, timeout_sec: int = 120) -> dict:
     data = json.dumps(payload).encode("utf-8")
 
     try:

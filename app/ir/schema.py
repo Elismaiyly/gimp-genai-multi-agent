@@ -16,6 +16,7 @@ ALLOWED_ACTIONS = {
     # ============================================================
     "object.remove",           # Supprimer un objet détecté
     "object.recolor",          # Changer la couleur d'un objet
+    "object.highlight",        # Mettre en valeur un objet
     "object.duplicate",        # Dupliquer un objet
     "object.move",             # Déplacer un objet
     "object.resize",           # Redimensionner un objet
@@ -68,6 +69,9 @@ ALLOWED_ACTIONS = {
     "gimp.effect.vignette",            # Vignettage
     "gimp.effect.glow",                # Effet lumineux
     "gimp.effect.shadow",              # Ombre portée
+    "background.blur",                 # Flouter l'arrière-plan
+    "background.replace",              # Remplacer l'arrière-plan
+    "smart.edit",                      # Amélioration automatique
 }
 
 
@@ -104,5 +108,41 @@ def validate_ir(ir: Dict[str, Any]) -> List[str]:
         params = act.get("params", {})
         if not isinstance(params, dict):
             errors.append(f"Action #{i} params doit être un dict")
+            continue
+
+        if name == "object.highlight":
+            obj = params.get("object", "person")
+            if not isinstance(obj, str) or not obj.strip():
+                errors.append(f"Action #{i} object.highlight requiert un paramètre 'object' string non vide")
+
+            if "instance" in params and not isinstance(params.get("instance"), dict):
+                errors.append(f"Action #{i} object.highlight: 'instance' doit être un dict")
+
+        if name == "background.blur":
+            if "intensity" in params and not isinstance(params.get("intensity"), (int, float)):
+                errors.append(f"Action #{i} background.blur: 'intensity' doit être un nombre")
+
+            if "instance" in params and not isinstance(params.get("instance"), dict):
+                errors.append(f"Action #{i} background.blur: 'instance' doit être un dict")
+
+        if name == "background.replace":
+            if "color" in params and (not isinstance(params.get("color"), str) or not params.get("color").strip()):
+                errors.append(f"Action #{i} background.replace: 'color' doit être une string non vide")
+
+            if "object" in params and (not isinstance(params.get("object"), str) or not params.get("object").strip()):
+                errors.append(f"Action #{i} background.replace: 'object' doit être une string non vide")
+
+            if "instance" in params and not isinstance(params.get("instance"), dict):
+                errors.append(f"Action #{i} background.replace: 'instance' doit être un dict")
+
+        if name == "smart.edit":
+            if "intensity" in params and not isinstance(params.get("intensity"), (int, float, str)):
+                errors.append(f"Action #{i} smart.edit: 'intensity' doit être une string ou un nombre")
+
+            if "object" in params and (not isinstance(params.get("object"), str) or not params.get("object").strip()):
+                errors.append(f"Action #{i} smart.edit: 'object' doit être une string non vide")
+
+            if "instance" in params and not isinstance(params.get("instance"), dict):
+                errors.append(f"Action #{i} smart.edit: 'instance' doit être un dict")
 
     return errors
