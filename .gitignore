@@ -89,3 +89,15 @@ node_modules/
 # Generated screenshots or masks
 *.mask.png
 *.result.png
+# Training / dataset scripts
+app/agent/
+
+# Student model artifacts
+app/student_model/*.zip
+app/student_model/evaluate_student.py
+app/student_model/test_student.py
+
+# Heavy research folders
+lama/
+sam/
+pipeline/
